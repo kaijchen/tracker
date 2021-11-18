@@ -37,18 +37,38 @@ var (
 type server struct {
 	pb.UnimplementedTrackerServer
 	mu      sync.RWMutex
-	objects map[string][]int
+	objects map[string]*rrQueue
 	peerID  map[string]int
 	peers   []string
+}
+
+type rrQueue struct {
+	q []int
+	i int
+}
+
+func (rq *rrQueue) get() int {
+	if len(rq.q) == 0 {
+		return -1
+	}
+	rq.i = (rq.i + 1) % len(rq.q)
+	return rq.q[rq.i]
+}
+
+func (rq *rrQueue) put(x int) {
+	rq.q = append(rq.q, x)
 }
 
 func (s *server) Query(ctx context.Context, in *pb.QueryRequest) (*pb.QueryReply, error) {
 	log.Printf("Fetching: %v", in.GetKey())
 	var loc string
 	s.mu.RLock()
-	peerIDs := s.objects[in.GetKey()]
-	if len(peerIDs) > 0 {
-		loc = s.peers[peerIDs[0]]
+	rrq := s.objects[in.GetKey()]
+	if rrq != nil {
+		id := rrq.get()
+		if id >= 0 {
+			loc = s.peers[id]
+		}
 	}
 	s.mu.RUnlock()
 	return &pb.QueryReply{Location: loc}, nil
@@ -61,7 +81,12 @@ func (s *server) Report(ctx context.Context, in *pb.ReportRequest) (*pb.ReportRe
 		s.peerID[in.GetLocation()] = len(s.peers)
 		s.peers = append(s.peers, in.GetLocation())
 	}
-	s.objects[in.GetKey()] = append(s.objects[in.GetKey()], s.peerID[in.GetLocation()])
+	rrq := s.objects[in.GetKey()]
+	if rrq == nil {
+		rrq = &rrQueue{}
+		s.objects[in.GetKey()] = rrq
+	}
+	rrq.put(s.peerID[in.GetLocation()])
 	s.mu.Unlock()
 	return &pb.ReportReply{Ok: true}, nil
 }
@@ -73,7 +98,7 @@ func main() {
 		log.Fatalf("failed to listen: %v", err)
 	}
 	s := grpc.NewServer()
-	pb.RegisterTrackerServer(s, &server{objects: make(map[string][]int), peerID: make(map[string]int)})
+	pb.RegisterTrackerServer(s, &server{objects: make(map[string]*rrQueue), peerID: make(map[string]int)})
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
