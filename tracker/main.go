@@ -20,18 +20,15 @@ package main
 
 import (
 	"context"
-	"flag"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"sync"
 
 	pb "github.com/kaijchen/tracker/track"
 	"google.golang.org/grpc"
-)
-
-var (
-	port = flag.Int("config", 2333, "The tracker port")
 )
 
 type server struct {
@@ -45,6 +42,29 @@ type server struct {
 type rrQueue struct {
 	q []int
 	i int
+}
+
+const (
+	defaultConfigPath = "/etc/tracker/config.json"
+)
+
+type config struct {
+	Port     int      `json:"port"`
+	Registry []string `json:"registry"`
+}
+
+var (
+	registryIDs []int
+)
+
+func getConfig(path string) (config, error) {
+	cfg := config{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, err
+	}
+	err = json.Unmarshal(data, &cfg)
+	return cfg, err
 }
 
 func (rq *rrQueue) get() int {
@@ -64,11 +84,14 @@ func (s *server) Query(ctx context.Context, in *pb.QueryRequest) (*pb.QueryReply
 	var loc string
 	s.mu.RLock()
 	rrq := s.objects[in.GetKey()]
-	if rrq != nil {
-		id := rrq.get()
-		if id >= 0 {
-			loc = s.peers[id]
-		}
+	if rrq == nil {
+		rrq = &rrQueue{}
+		rrq.q = append(rrq.q, registryIDs...)
+		s.objects[in.GetKey()] = rrq
+	}
+	id := rrq.get()
+	if id >= 0 {
+		loc = s.peers[id]
 	}
 	s.mu.RUnlock()
 	return &pb.QueryReply{Location: loc}, nil
@@ -84,6 +107,7 @@ func (s *server) Report(ctx context.Context, in *pb.ReportRequest) (*pb.ReportRe
 	rrq := s.objects[in.GetKey()]
 	if rrq == nil {
 		rrq = &rrQueue{}
+		rrq.q = append(rrq.q, registryIDs...)
 		s.objects[in.GetKey()] = rrq
 	}
 	rrq.put(s.peerID[in.GetLocation()])
@@ -92,13 +116,22 @@ func (s *server) Report(ctx context.Context, in *pb.ReportRequest) (*pb.ReportRe
 }
 
 func main() {
-	flag.Parse()
-	lis, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", *port))
+	cfg, err := getConfig(defaultConfigPath)
+	if err != nil {
+		log.Fatalf("failed to get config: %v", err)
+	}
+	lis, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", cfg.Port))
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
 	s := grpc.NewServer()
-	pb.RegisterTrackerServer(s, &server{objects: make(map[string]*rrQueue), peerID: make(map[string]int)})
+	srv := server{objects: make(map[string]*rrQueue), peerID: make(map[string]int)}
+	for i, r := range cfg.Registry {
+		srv.peers = append(srv.peers, r)
+		srv.peerID[r] = i
+		registryIDs = append(registryIDs, i)
+	}
+	pb.RegisterTrackerServer(s, &srv)
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
 	}
