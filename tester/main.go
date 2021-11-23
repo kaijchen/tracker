@@ -22,6 +22,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	pb "github.com/kaijchen/tracker/track"
@@ -44,7 +45,11 @@ func main() {
 	defer cancel()
 	switch os.Args[1] {
 	case "r":
-		r, err := c.Report(ctx, &pb.ReportRequest{Key: os.Args[2], Location: os.Args[3]})
+		src, err := strconv.Atoi(os.Args[4])
+		if err != nil {
+			src = -1
+		}
+		r, err := c.Report(ctx, &pb.ReportRequest{Key: os.Args[2], Location: os.Args[3], Source: int64(src)})
 		if err != nil {
 			log.Fatalf("could not report: %v", err)
 		}
@@ -54,6 +59,6 @@ func main() {
 		if err != nil {
 			log.Fatalf("could not query: %v", err)
 		}
-		log.Printf("Result: %v", r.GetLocation())
+		log.Printf("Result: %v, src=%v", r.GetLocation(), r.GetSource())
 	}
 }

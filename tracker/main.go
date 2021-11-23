@@ -50,11 +50,14 @@ const (
 
 type config struct {
 	Port     int      `json:"port"`
+	MaxLoad  int      `json:"maxload"`
 	Registry []string `json:"registry"`
 }
 
 var (
 	registryIDs []int
+	peerLoad    []int
+	maxLoad     int
 )
 
 func getConfig(path string) (config, error) {
@@ -71,8 +74,15 @@ func (rq *rrQueue) get() int {
 	if len(rq.q) == 0 {
 		return -1
 	}
-	rq.i = (rq.i + 1) % len(rq.q)
-	return rq.q[rq.i]
+	for range rq.q {
+		rq.i = (rq.i + 1) % len(rq.q)
+		id := rq.q[rq.i]
+		if maxLoad == 0 || peerLoad[id] < maxLoad {
+			peerLoad[id]++
+			return id
+		}
+	}
+	return -1
 }
 
 func (rq *rrQueue) put(x int) {
@@ -80,7 +90,7 @@ func (rq *rrQueue) put(x int) {
 }
 
 func (s *server) Query(ctx context.Context, in *pb.QueryRequest) (*pb.QueryReply, error) {
-	log.Printf("Fetching: %v", in.GetKey())
+	//log.Printf("Fetching: %v", in.GetKey())
 	var loc string
 	s.mu.RLock()
 	rrq := s.objects[in.GetKey()]
@@ -94,15 +104,19 @@ func (s *server) Query(ctx context.Context, in *pb.QueryRequest) (*pb.QueryReply
 		loc = s.peers[id]
 	}
 	s.mu.RUnlock()
-	return &pb.QueryReply{Location: loc}, nil
+	return &pb.QueryReply{Location: loc, Source: int64(id)}, nil
 }
 
 func (s *server) Report(ctx context.Context, in *pb.ReportRequest) (*pb.ReportReply, error) {
-	log.Printf("Report: %v at %v", in.GetKey(), in.GetLocation())
+	//log.Printf("Report: %v at %v, src %v", in.GetKey(), in.GetLocation(), in.GetSource())
 	s.mu.Lock()
+	if in.GetSource() >= 0 {
+		peerLoad[in.GetSource()]--
+	}
 	if _, ok := s.peerID[in.GetLocation()]; !ok {
 		s.peerID[in.GetLocation()] = len(s.peers)
 		s.peers = append(s.peers, in.GetLocation())
+		peerLoad = append(peerLoad, 0)
 	}
 	rrq := s.objects[in.GetKey()]
 	if rrq == nil {
@@ -125,9 +139,14 @@ func main() {
 		log.Fatalf("failed to listen: %v", err)
 	}
 	s := grpc.NewServer()
-	srv := server{objects: make(map[string]*rrQueue), peerID: make(map[string]int)}
+	srv := server{
+		objects: make(map[string]*rrQueue),
+		peerID:  make(map[string]int),
+	}
+	maxLoad = cfg.MaxLoad
 	for i, r := range cfg.Registry {
 		srv.peers = append(srv.peers, r)
+		peerLoad = append(peerLoad, 0)
 		srv.peerID[r] = i
 		registryIDs = append(registryIDs, i)
 	}
